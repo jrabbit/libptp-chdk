@@ -27,6 +27,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef WIN32
+#include <winsock2.h>
+#endif
+
 #ifdef ENABLE_NLS
 #  include <libintl.h>
 #  undef _
@@ -1691,3 +1695,486 @@ ptp_get_operation_name(PTPParams* params, uint16_t oc)
 	return NULL;
 }
 
+
+/****** CHDK interface ******/
+#ifdef WIN32
+#define usleep(usec) Sleep((usec)/1000)
+#define sleep(sec) Sleep(sec*1000)
+#endif
+
+int ptp_chdk_shutdown_hard(PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  return ptp_chdk_exec_lua("shut_down(1);",0,params,deviceinfo);
+}
+
+int ptp_chdk_shutdown_soft(PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  return ptp_chdk_exec_lua("shut_down(0);",0,params,deviceinfo);
+}
+
+int ptp_chdk_reboot(PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  return ptp_chdk_exec_lua("reboot();",0,params,deviceinfo);
+}
+
+int ptp_chdk_reboot_fw_update(char *path, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  char *s;
+  int ret;
+
+  s = malloc(strlen(path)+12);
+  if ( s == NULL )
+  {
+    ptp_error(params,"could not allocate memory for command",ret);
+    return 0;
+  }
+
+  sprintf(s,"reboot(\"%s\");",path);
+  ret = ptp_chdk_exec_lua(s,0,params,deviceinfo);
+
+  free(s);
+
+  return ret;
+}
+
+char* ptp_chdk_get_memory(int start, int num, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  uint16_t ret;
+  PTPContainer ptp;
+  char *buf = NULL;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=3;
+  ptp.Param1=PTP_CHDK_GetMemory;
+  ptp.Param2=start;
+  ptp.Param3=num;
+  ret=ptp_transaction(params, &ptp, PTP_DP_GETDATA, 0, &buf);
+  if ( ret != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",ret);
+    free(buf);
+    return NULL;
+  }
+  return buf;
+}
+
+int ptp_chdk_set_memory_long(int addr, int val, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  uint16_t ret;
+  PTPContainer ptp;
+  char *buf = (char *) &val;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=3;
+  ptp.Param1=PTP_CHDK_SetMemory;
+  ptp.Param2=addr;
+  ptp.Param3=4;
+  ret=ptp_transaction(params, &ptp, PTP_DP_SENDDATA, 4, &buf);
+  if ( ret != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",ret);
+    return 0;
+  }
+  return 1;
+}
+
+int ptp_chdk_call(int *args, int size, int *ret, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  uint16_t r;
+  PTPContainer ptp;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=1;
+  ptp.Param1=PTP_CHDK_CallFunction;
+  r=ptp_transaction(params, &ptp, PTP_DP_SENDDATA, size*sizeof(int), (char **) &args);
+  if ( r != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",r);
+    return 0;
+  }
+  if ( ret )
+  {
+    *ret = ptp.Param1;
+  }
+  return 1;
+}
+
+int* ptp_chdk_get_propcase(int start, int num, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  ptp_error(params,"not implemented! (use Lua)");
+  return NULL;
+}
+
+char* ptp_chdk_get_paramdata(int start, int num, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  ptp_error(params,"not implemented! (use Lua)");
+  return NULL;
+}
+
+int ptp_chdk_upload(char *local_fn, char *remote_fn, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  uint16_t ret;
+  PTPContainer ptp;
+  char *buf = NULL;
+  FILE *f;
+  int s,l;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=1;
+  ptp.Param1=PTP_CHDK_UploadFile;
+
+  f = fopen(local_fn,"rb");
+  if ( f == NULL )
+  {
+    ptp_error(params,"could not open file \'%s\'",local_fn);
+    return 0;
+  }
+
+  fseek(f,0,SEEK_END);
+  s = ftell(f);
+  fseek(f,0,SEEK_SET);
+
+  l = strlen(remote_fn);
+  buf = malloc(4+l+s);
+  memcpy(buf,&l,4);
+  memcpy(buf+4,remote_fn,l);
+  fread(buf+4+l,1,s,f);
+
+  fclose(f);
+
+  ret=ptp_transaction(params, &ptp, PTP_DP_SENDDATA, 4+l+s, &buf);
+
+  free(buf);
+
+  if ( ret != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",ret);
+    return 0;
+  }
+  return 1;
+}
+
+int ptp_chdk_download(char *remote_fn, char *local_fn, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  uint16_t ret;
+  PTPContainer ptp;
+  char *buf = NULL;
+  FILE *f;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=2;
+  ptp.Param1=PTP_CHDK_TempData;
+  ptp.Param2=0;
+  ret=ptp_transaction(params, &ptp, PTP_DP_SENDDATA, strlen(remote_fn), &remote_fn);
+  if ( ret != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",ret);
+    return 0;
+  }
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=1;
+  ptp.Param1=PTP_CHDK_DownloadFile;
+
+  ret=ptp_transaction(params, &ptp, PTP_DP_GETDATA, 0, &buf);
+  if ( ret != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",ret);
+    return 0;
+  }
+  
+  f = fopen(local_fn,"wb");
+  if ( f == NULL )
+  {
+    ptp_error(params,"could not open file \'%s\'",local_fn);
+    free(buf);
+    return 0;
+  }
+
+  fwrite(buf,1,ptp.Param1,f);
+  fclose(f);
+
+  free(buf);
+
+  return 1;
+}
+
+int ptp_chdk_switch_mode(int mode, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  char s[16];
+  int ret;
+
+  if ( mode/10 != 0 )
+  {
+    ptp_error(params,"mode not supported by ptpcam");
+    return 0;
+  }
+
+  sprintf(s,"switch_mode_usb(%i);",mode);
+  return ptp_chdk_exec_lua(s,0,params,deviceinfo);
+}
+
+static int script_id;
+
+// get_result: 0 just start the script. 1 wait for script to end or error. 2 add return and wait
+int ptp_chdk_exec_lua(char *script, int get_result, PTPParams* params, PTPDeviceInfo* deviceinfo)
+{
+  uint16_t r;
+  PTPContainer ptp;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=2;
+  ptp.Param1=PTP_CHDK_ExecuteScript;
+  ptp.Param2=PTP_CHDK_SL_LUA;
+
+  // TODO HACKY
+  if ( get_result == 2 )
+  {
+    char *buf = (char *) malloc(9+strlen(script)+1);
+    sprintf(buf,"return (%s)",script); // note parens make multiple return difficult
+    script = buf;
+  }
+
+  r=ptp_transaction(params, &ptp, PTP_DP_SENDDATA, strlen(script)+1, &script);
+  if ( get_result == 2 )
+  {
+    free(script);
+  }
+  if ( r != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",r);
+    return 0;
+  }
+
+  script_id = ptp.Param1;
+  printf("script:%d\n",script_id);
+  // if script didn't load correctly, we know right away from the status code, so report any errors even if wait not requested
+  if (ptp.Param2 != PTP_CHDK_S_ERRTYPE_NONE) {
+    // TODO - might want to filter non-error messages
+    ptp_chdk_print_all_script_messages(params,deviceinfo);
+    return 0;
+  }
+  if ( get_result )
+  {
+    int script_status;
+    while(1) { // TODO timeout
+      usleep(250000);
+      ptp_chdk_get_script_status(params,deviceinfo,&script_status);
+      if(script_status & PTP_CHDK_SCRIPT_STATUS_MSG) {
+        ptp_chdk_print_all_script_messages(params,deviceinfo);
+      }
+      if(!(script_status & PTP_CHDK_SCRIPT_STATUS_RUN)) {
+        break;
+      }
+    }
+// can we be sure we will have all messages when STATUS_RUN goes off ?
+//    ptp_chdk_print_script_messages(params,deviceinfo);
+  }
+
+  return 1;
+}
+
+int ptp_chdk_get_version(PTPParams* params, PTPDeviceInfo* deviceinfo, int *major, int *minor)
+{
+  uint16_t r;
+  PTPContainer ptp;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=1;
+  ptp.Param1=PTP_CHDK_Version;
+  r=ptp_transaction(params, &ptp, PTP_DP_NODATA, 0, NULL);
+  if ( r != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",r);
+    return 0;
+  }
+  *major = ptp.Param1;
+  *minor = ptp.Param2;
+  return 1;
+}
+int ptp_chdk_get_script_status(PTPParams* params, PTPDeviceInfo* deviceinfo, int *status)
+{
+  uint16_t r;
+  PTPContainer ptp;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=1;
+  ptp.Param1=PTP_CHDK_ScriptStatus;
+  r=ptp_transaction(params, &ptp, PTP_DP_NODATA, 0, NULL);
+  if ( r != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",r);
+    return 0;
+  }
+  *status = ptp.Param1;
+  return 1;
+}
+int ptp_chdk_get_script_support(PTPParams* params, PTPDeviceInfo* deviceinfo, int *status)
+{
+  uint16_t r;
+  PTPContainer ptp;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=1;
+  ptp.Param1=PTP_CHDK_ScriptSupport;
+  r=ptp_transaction(params, &ptp, PTP_DP_NODATA, 0, NULL);
+  if ( r != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",r);
+    return 0;
+  }
+  *status = ptp.Param1;
+  return 1;
+}
+int ptp_chdk_write_script_msg(PTPParams* params, PTPDeviceInfo* deviceinfo, char *data, unsigned size, int *status)
+{
+  uint16_t r;
+  PTPContainer ptp;
+
+  // a zero length data phase appears to do bad things, camera stops responding to PTP
+  if(!size) {
+    ptp_error(params,"zero length message not allowed");
+    *status = 0;
+	return 0;
+  }
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=2;
+  ptp.Param1=PTP_CHDK_WriteScriptMsg;
+  ptp.Param2=script_id; // TODO test don't care ?
+//  ptp.Param3=size;
+
+  r=ptp_transaction(params, &ptp, PTP_DP_SENDDATA, size, &data);
+  if ( r != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",r);
+    *status = 0;
+    return 0;
+  }
+  *status = ptp.Param1;
+  return 1;
+}
+int ptp_chdk_read_script_msg(PTPParams* params, PTPDeviceInfo* deviceinfo,ptp_chdk_script_msg **msg)
+{
+  uint16_t r;
+  PTPContainer ptp;
+
+  PTP_CNT_INIT(ptp);
+  ptp.Code=PTP_OC_CHDK;
+  ptp.Nparam=1;
+  ptp.Param1=PTP_CHDK_ReadScriptMsg;
+  char *data = NULL;
+
+  // camera will always send data, otherwise getdata will cause problems
+  r=ptp_transaction(params, &ptp, PTP_DP_GETDATA, 0, &data);
+  if ( r != 0x2001 )
+  {
+    ptp_error(params,"unexpected return code 0x%x",r);
+    free(data);
+    *msg = NULL;
+    return 0;
+  }
+  *msg = malloc(sizeof(ptp_chdk_script_msg) + ptp.Param4);
+  (*msg)->type = ptp.Param1;
+  (*msg)->subtype = ptp.Param2;
+  (*msg)->script_id = ptp.Param3;
+  (*msg)->size = ptp.Param4;
+  memcpy((*msg)->data,data,(*msg)->size);
+  return 1;
+}
+
+// print message in user friendly format
+void ptp_chdk_print_script_message(ptp_chdk_script_msg *msg) {
+  char *mtype,*msubtype;
+//  printf("msg->type %d\n",msg->type);
+  if(msg->type == PTP_CHDK_S_MSGTYPE_NONE) {
+    return;
+  }
+  printf("%d:",msg->script_id);
+  if(msg->type == PTP_CHDK_S_MSGTYPE_ERR) {
+    printf("%s error: ",(msg->subtype == PTP_CHDK_S_ERRTYPE_RUN)?"runtime":"syntax");
+    fwrite(msg->data,msg->size,1,stdout); // may not be null terminated
+    printf("\n");
+    return;
+  }
+  if(msg->type == PTP_CHDK_S_MSGTYPE_RET) {
+    printf("ret:");
+  } else if(msg->type == PTP_CHDK_S_MSGTYPE_USER) {
+    printf("msg:");
+  } else {
+//     ptp_error(params,"unknown message type %d",msg->type);
+     printf("unknown message type %d\n",msg->type);
+  }
+  // 
+  switch(msg->subtype) {
+    case PTP_CHDK_TYPE_UNSUPPORTED:
+      printf("unsupported data type: ",msg->data);
+      fwrite(msg->data,msg->size,1,stdout); // may not be null terminated
+      break;
+
+    case PTP_CHDK_TYPE_NIL:
+      printf("nil");
+      break;
+
+    case PTP_CHDK_TYPE_BOOLEAN:
+      if ( *(int32_t *)msg->data )
+        printf("true");
+      else
+        printf("false");
+      break;
+
+    case PTP_CHDK_TYPE_INTEGER:
+      printf("%i (%x)",*(int32_t *)msg->data,*(int32_t *)msg->data);
+      break;
+
+    case PTP_CHDK_TYPE_STRING:
+    // NOTE you could identify tables here if you wanted
+    case PTP_CHDK_TYPE_TABLE:
+      printf("'");
+      fwrite(msg->data,msg->size,1,stdout); // may not be null terminated
+      printf("'");
+      break;
+
+    default:
+      printf("unknown message type %d",msg->type);
+//        ptp_error(params,"message value has unsupported type");
+      break;
+  }
+  printf("\n");
+}
+
+// read and print all availble messages
+int ptp_chdk_print_all_script_messages(PTPParams* params, PTPDeviceInfo* deviceinfo) {
+  ptp_chdk_script_msg *msg;
+  while(1) {
+//    printf("reading messages\n");
+    if(!ptp_chdk_read_script_msg(params,deviceinfo,&msg)) {
+      printf("error reading messages\n");
+      return 0;
+    }
+    if(msg->type == PTP_CHDK_S_MSGTYPE_NONE) {
+        free(msg);
+//      printf("no more messages\n");
+      break;
+    }
+// not needed, we print script ID with message/return
+/*
+    if(msg->script_id != script_id) {
+      ptp_error(params,"message from unexpected script id %d",msg->script_id);
+    }
+*/
+    ptp_chdk_print_script_message(msg);
+    free(msg);
+  }
+  return 1;
+}

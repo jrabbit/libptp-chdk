@@ -30,8 +30,15 @@
 #include <utime.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#ifndef WIN32
 #include <sys/mman.h>
+#endif
 #include <usb.h>
+
+#ifdef WIN32
+#define usleep(usec) Sleep((usec)/1000)
+#define sleep(sec) Sleep(sec*1000)
+#endif
 
 #ifdef ENABLE_NLS
 #  include <libintl.h>
@@ -55,6 +62,13 @@
 #include "ptpcam.h"
 
 /* some defines comes here */
+
+/* CHDK additions */
+#define CHDKBUFS 65535
+#define CHDK_MODE_INTERACTIVE 0
+#define CHDK_MODE_CLI 1
+#define MAXCONNRETRIES 10
+
 
 /* USB interface class */
 #ifndef USB_CLASS_PTP
@@ -140,6 +154,9 @@ help()
 	"  -f, --force                  Talk to non PTP devices\n"
 	"  -v, --verbose                Be verbose (print more debug)\n"
 	"  -h, --help                   Print this help message\n"
+	"  --chdk[=command]             CHDK mode. Interactive shell unless optional\n"
+	"                               command is given. Run interactive shell and\n"
+	"                               press 'h' for a list of commands.\n"
 	"\n");
 }
 
@@ -361,7 +378,11 @@ find_device (int busn, int devn, short force)
 		int curbusn, curdevn;
 
 		curbusn=strtol(bus->dirname,NULL,10);
+#ifdef WIN32
+		curdevn=strtol(strchr(dev->filename,'-')+1,NULL,10);
+#else    
 		curdevn=strtol(dev->filename,NULL,10);
+#endif
 
 		if (devn==0) {
 			if (busn==0) return dev;
@@ -414,24 +435,48 @@ find_endpoints(struct usb_device *dev, int* inep, int* outep, int* intep)
 int
 open_camera (int busn, int devn, short force, PTP_USB *ptp_usb, PTPParams *params, struct usb_device **dev)
 {
+	int retrycnt=0;
+	uint16_t ret=0;
+
 #ifdef DEBUG
 	printf("dev %i\tbus %i\n",devn,busn);
 #endif
 	
-	*dev=find_device(busn,devn,force);
+  // retry device find for a while (in case the user just powered it on or called restart)
+	while ((retrycnt++ < MAXCONNRETRIES) && !ret) {
+		*dev=find_device(busn,devn,force);
+		if (*dev!=NULL) 
+			ret=1;
+		else {
+			fprintf(stderr,"Could not find any device matching given bus/dev numbers, retrying in 1 s...\n");
+			fflush(stderr);
+			sleep(1);
+		}
+	}
+
 	if (*dev==NULL) {
 		fprintf(stderr,"could not find any device matching given "
 		"bus/dev numbers\n");
-		exit(-1);
+		return -1;
 	}
 	find_endpoints(*dev,&ptp_usb->inep,&ptp_usb->outep,&ptp_usb->intep);
+    init_ptp_usb(params, ptp_usb, *dev);   
 
-	init_ptp_usb(params, ptp_usb, *dev);
-	if (ptp_opensession(params,1)!=PTP_RC_OK) {
+  // first connection attempt often fails if some other app or driver has accessed the camera, retry for a while
+	retrycnt=0;
+	while ((retrycnt++ < MAXCONNRETRIES) && ((ret=ptp_opensession(params,1))!=PTP_RC_OK)) {
+		printf("Failed to connect (attempt %d), retrying in 1 s...\n", retrycnt);
+		close_usb(ptp_usb, *dev);
+		sleep(1);
+		find_endpoints(*dev,&ptp_usb->inep,&ptp_usb->outep,&ptp_usb->intep);
+		init_ptp_usb(params, ptp_usb, *dev);   
+	}  
+	if (ret != PTP_RC_OK) {
 		fprintf(stderr,"ERROR: Could not open session!\n");
 		close_usb(ptp_usb, *dev);
 		return -1;
 	}
+
 	if (ptp_getdeviceinfo(params,&params->deviceinfo)!=PTP_RC_OK) {
 		fprintf(stderr,"ERROR: Could not get device info!\n");
 		close_usb(ptp_usb, *dev);
@@ -647,7 +692,11 @@ download:
 		if (oi.ObjectFormat == PTP_OFC_Association)
 				goto out;
 		filename=(oi.Filename);
+#ifdef WIN32
+                goto out;
+#else
 		file=open(filename, (overwrite==OVERWRITE_EXISTING?0:O_EXCL)|O_RDWR|O_CREAT|O_TRUNC,S_IRWXU|S_IRGRP);
+#endif
 		if (file==-1) {
 			if (errno==EEXIST) {
 				printf("Skipping file: \"%s\", file exists!\n",filename);
@@ -662,6 +711,7 @@ download:
 			perror("write");
 			goto out;
 		}
+#ifndef WIN32
 		image=mmap(0,oi.ObjectCompressedSize,PROT_READ|PROT_WRITE,MAP_SHARED,
 			file,0);
 		if (image==MAP_FAILED) {
@@ -669,6 +719,7 @@ download:
 			close(file);
 			goto out;
 		}
+#endif
 		printf ("Saving file: \"%s\" ",filename);
 		fflush(NULL);
 		ret=ptp_getobject(&params,handle,&image);
@@ -1130,7 +1181,11 @@ save_object(PTPParams *params, uint32_t handle, char* filename, PTPObjectInfo oi
 	int ret;
 	struct utimbuf timebuf;
 
+#ifdef WIN32
+        goto out;
+#else
 	file=open(filename, (overwrite==OVERWRITE_EXISTING?0:O_EXCL)|O_RDWR|O_CREAT|O_TRUNC,S_IRWXU|S_IRGRP);
+#endif
 	if (file==-1) {
 		if (errno==EEXIST) {
 			printf("Skipping file: \"%s\", file exists!\n",filename);
@@ -1145,6 +1200,7 @@ save_object(PTPParams *params, uint32_t handle, char* filename, PTPObjectInfo oi
 	    perror("write");
 	    goto out;
 	}
+#ifndef WIN32
 	image=mmap(0,oi.ObjectCompressedSize,PROT_READ|PROT_WRITE,MAP_SHARED,
 		file,0);
 	if (image==MAP_FAILED) {
@@ -1152,6 +1208,7 @@ save_object(PTPParams *params, uint32_t handle, char* filename, PTPObjectInfo oi
 		close(file);
 		goto out;
 	}
+#endif
 	printf ("Saving file: \"%s\" ",filename);
 	fflush(NULL);
 	ret=ptp_getobject(params,handle,&image);
@@ -1553,7 +1610,7 @@ getset_propertybyname (int busn,int devn,char* property,char* value,short force)
 	4. get value code by name
 	5. set property
 	*/
-	while ((p=index(property,'-'))!=NULL) {
+	while ((p=strchr(property,'-'))!=NULL) {
 		*p=' ';
 	}
 
@@ -1573,7 +1630,7 @@ getset_propertybyname (int busn,int devn,char* property,char* value,short force)
 	}
 
 	if (value!=NULL) {
-		while ((p=index(value,'-'))!=NULL) {
+		while ((p=strchr(value,'-'))!=NULL) {
 			*p=' ';
 		}
 		propval=ptp_prop_getvalbyname(&params, value, dpc);
@@ -1895,6 +1952,10 @@ reset_device (int busn, int devn, short force)
 
 /* main program  */
 
+int chdk(int busn, int devn, short force);
+uint8_t chdkmode=0;
+char chdkarg[CHDKBUFS];
+
 int
 main(int argc, char ** argv)
 {
@@ -1942,6 +2003,7 @@ main(int argc, char ** argv)
 		{"overwrite",0,0,0},
 		{"force",0,0,'f'},
 		{"verbose",2,0,'v'},
+		{"chdk",2,0,0},
 		{0,0,0,0}
 	};
 
@@ -1955,6 +2017,17 @@ main(int argc, char ** argv)
 		switch (opt) {
 		/* set parameters */
 		case 0:
+			if (!(strcmp("chdk",loptions[option_index].name)))
+			{
+				action=ACT_CHDK;
+				if (optarg) {
+					chdkmode=CHDK_MODE_CLI;
+					strncpy(chdkarg, optarg, CHDKBUFS-1);
+					chdkarg[CHDKBUFS-1]='\0';
+				} else {
+					chdkmode=CHDK_MODE_INTERACTIVE;
+				}
+			}
 			if (!(strcmp("val",loptions[option_index].name)))
 				value=strdup(optarg);
 			if (!(strcmp("filename",loptions[option_index].name)))
@@ -2060,6 +2133,9 @@ main(int argc, char ** argv)
 		return 0;
 	}
 	switch (action) {
+                case ACT_CHDK:
+                        chdk(busn,devn,force);
+                        break;
 		case ACT_DEVICE_RESET:
 			reset_device(busn,devn,force);
 			break;
@@ -2119,4 +2195,564 @@ main(int argc, char ** argv)
 	}
 
 	return 0;
+
+}
+
+
+
+
+
+static int camera_bus = 0;
+static int camera_dev = 0;
+static int camera_force = 0;
+static PTP_USB ptp_usb;
+static PTPParams params;
+static struct usb_device *dev;
+static int connected = 0;
+
+static void open_connection()
+{
+  connected = (0 == open_camera(camera_bus,camera_dev,camera_force,&ptp_usb,&params,&dev));
+  if ( connected )
+  {
+    int major,minor;
+    if ( !ptp_chdk_get_version(&params,&params.deviceinfo,&major,&minor) )
+    {
+      printf("error: cannot get camera CHDK PTP version; either it has an unsupported version or no CHDK PTP support at all\n");
+    } else if ( major != PTP_CHDK_VERSION_MAJOR || minor < PTP_CHDK_VERSION_MINOR )
+    {
+      printf("error: camera has unsupported camera version %i.%i; some functionality may be missing or cause unintented consequences\n",major,minor);
+    }
+  }
+}
+
+static void close_connection()
+{
+  close_camera(&ptp_usb,&params,dev);
+}
+
+static void reset_connection()
+{
+  if ( connected )
+  {
+    close_connection();
+  }
+  open_connection();
+}
+
+static void print_safe(char *buf, int size)
+{
+  int i;
+  for (i=0; i<size; i++)
+  {
+    if ( buf[i] < ' ' || buf[i] > '~' )
+    {
+      printf(".");
+    } else {
+      printf("%c",buf[i]);
+    }
+  }
+}
+
+static void hexdump(char *buf, unsigned int size, unsigned int offset)
+{
+  unsigned int i;
+  char s[16];
+
+  if ( offset % 16 != 0 )
+  {
+      printf("%08x  ",offset);
+      for (i=0; i<(offset%16); i++)
+      {
+        printf("   ");
+      }
+      if ( offset % 16 > 8 )
+      {
+        printf(" ");
+      }
+      memset(s,' ',offset%16);
+  }
+  for (i=0; ; i++, offset++)
+  {
+    if ( offset % 16 == 0 )
+    {
+      if ( i > 0 )
+      {
+        printf(" |");
+        print_safe(s,16);
+        printf("|\n");
+      }
+      printf("%08x",offset);
+      if (i < size)
+      {
+        printf(" ");
+      }
+    }
+    if ( offset % 8 == 0 )
+    {
+      printf(" ");
+    }
+    if ( i == size )
+    {
+      break;
+    }
+    printf("%02x ",(unsigned char) buf[i]);
+    s[offset%16] = buf[i];
+  }
+  if ( offset % 16 != 0 )
+  {
+      for (i=0; i<16-(offset%16); i++)
+      {
+        printf("   ");
+      }
+      if ( offset % 16 < 8 )
+      {
+        printf(" ");
+      }
+      memset(s+(offset%16),' ',16-(offset%16));
+      printf(" |");
+      print_safe(s,16);
+      printf("|\n%08x",offset);
+  }
+  printf("\n");
+}
+
+int chdk(int busn, int devn, short force)
+{
+  char buf[CHDKBUFS], *s;
+  int i;
+  buf[CHDKBUFS-1] = '\0';
+
+  camera_bus = busn;
+  camera_dev = devn;
+  camera_force = force;
+  
+  open_connection();
+  if (chdkmode==CHDK_MODE_CLI) {
+    // printf("CHDK command line mode. Argument:%s\n", chdkarg);
+    if (!connected) {
+      printf("error: couldn't connect to camera.\n");
+      return(-1);
+    }
+  }
+  
+  while (1) {
+    if (chdkmode==CHDK_MODE_CLI) {
+      for (i=0; i<CHDKBUFS; i++) {
+        buf[i]=chdkarg[i];
+      }
+    } else { // CHDK_MODE_INTERACTIVE
+      printf("%s ",connected?"<conn>":"<    >"); fflush(stdout);
+      if ( fgets(buf,CHDKBUFS-1,stdin) == NULL )
+      {
+        printf("\n");
+        break;
+      }
+    }
+    s = buf+strlen(buf)-1;
+    while ( s >= buf && ( *s == '\n' || *s == '\r' ) )
+    {
+      *s = '\0';
+      s--;
+    }
+
+    if ( !strcmp("q",buf) || !strcmp("quit",buf) )
+    {
+      break;
+      
+    } else if ( !strcmp("h",buf) || !strcmp("help",buf) )
+    {
+      printf(
+          "q quit                         quit program\n"
+          "h help                         list commands\n"
+          "r reset                        reconnect to camera\n"
+          "  version                      get CHDK PTP version (ptpcam and camera)\n"
+//          "  shutdown-hard                shutdown camera (hard)\n"
+          "  shutdown                     shutdown camera (soft)\n"
+          "  reboot                       reboot camera\n"
+          "  reboot <filename>            reboot camera using specified firmware update\n"
+          "  reboot-fi2                   reboot camera using default firmware update\n"
+          "m memory <address>             get byte at address\n" 
+          "m memory <address>-<address>   get bytes at given range\n" 
+          "m memory <address> <num>       get num bytes at given address\n"
+          "  set <address> <long>         set long value at address\n"
+          "c call <address> <arg1> ...    call function at address with given arguments\n"
+//          "  prop <id>                    get value of property\n"
+//          "  prop <id>-<id>               get values in property range\n"
+//          "  prop <id> <num>              get num values of properties starting at id\n"
+//          "  param <id>                   get value of parameter\n"
+//          "  param <id>-<id>              get values in parameter range\n"
+//          "  param <id> <num>             get num values of parameters starting at id\n"
+          "  upload <local> <remote>      upload local file to camera\n"
+          "  download <remote> <local>    download file from camera\n"
+          "  mode <val>                   set mode (0=playback,1=record)\n"
+          "  lua <code>                   execute lua code\n"
+          "  luar <code>                  execute \"return <code>\" and retreive result\n"
+          "  script-support               show supported script interfaces\n"
+          "  script-status                show script execution and message status\n"
+          "  getm                         get messages / return values from script\n"
+          "  putm <message>               send <message> to running script\n"
+          );
+      
+    } else if ( !strcmp("r",buf) || !strcmp("reset",buf) )
+    {
+      reset_connection();
+
+    } else if ( !strcmp("version",buf) )
+    {
+      int major, minor;
+      printf("ptpcam: %i.%i\n",PTP_CHDK_VERSION_MAJOR,PTP_CHDK_VERSION_MINOR);
+      if ( ptp_chdk_get_version(&params,&params.deviceinfo,&major,&minor) )
+      {
+        printf("camera: %i.%i\n",major,minor);
+      }
+
+    } else if ( !strcmp("shutdown-hard",buf) )
+    {
+      if ( ptp_chdk_shutdown_hard(&params,&params.deviceinfo) )
+      {
+        connected = 0;
+      }
+
+    } else if ( !strcmp("shutdown",buf) )
+    {
+      if ( ptp_chdk_shutdown_soft(&params,&params.deviceinfo) )
+      {
+        connected = 0;
+      }
+
+    } else if ( !strcmp("reboot",buf) )
+    {
+      if ( ptp_chdk_reboot(&params,&params.deviceinfo) )
+      {
+        connected = 0;
+        sleep(2);
+        open_connection();
+      }
+
+    } else if ( !strcmp("reboot-fi2",buf) )
+    {
+      if ( ptp_chdk_reboot_fw_update("A/PS.FI2",&params,&params.deviceinfo) )
+      {
+        connected = 0;
+        sleep(2);
+        open_connection();
+      }
+
+    } else if ( !strncmp("reboot ",buf,7) )
+    {
+      char *s;
+      if ( (s = strchr(buf,'\r')) != NULL )
+      {
+        *s = '\0';
+      }
+      if ( (s = strchr(buf,'\n')) != NULL )
+      {
+        *s = '\0';
+      }
+      if ( ptp_chdk_reboot_fw_update(buf+7,&params,&params.deviceinfo) )
+      {
+        connected = 0;
+        sleep(2);
+        open_connection();
+      }
+      
+    } else if ( !strncmp("m ",buf,2) || !strncmp("memory ",buf,7) )
+    {
+      int start;
+      int end;
+      char *s;
+      char *buf2;
+      
+      buf2 = strchr(buf,' ')+1;
+
+      if ( (s = strchr(buf2,'-')) != NULL )
+      {
+        *s = '\0';
+        start = strtoul(buf2,NULL,0);
+        end = strtoul(s+1,NULL,0)+1;
+      } else if ( (s = strchr(buf2,' ')) != NULL )
+      {
+        *s = '\0';
+        start = strtoul(buf2,NULL,0);
+        end = start+strtoul(s+1,NULL,0);
+      } else {
+        start = strtoul(buf2,NULL,0);
+        end = start+1;
+      }
+     
+      if ( (buf2 = ptp_chdk_get_memory(start,end-start,&params,&params.deviceinfo)) == NULL )
+      {
+        printf("error getting memory\n");
+      } else {
+        hexdump(buf2,end-start,start);
+        free(buf2);
+      }
+      
+    } else if ( !strncmp("set ",buf,4) )
+    {
+      int addr;
+      int val;
+      char *s;
+
+      if ( (s = strchr(buf+4,' ')) == NULL )
+      {
+        printf("invalid arguments\n");
+      } else {
+        *s = '\0';
+        addr = strtoul(buf+4,NULL,0);
+        val = strtoul(s+1,NULL,0);
+      
+        if ( !ptp_chdk_set_memory_long(addr,val,&params,&params.deviceinfo) )
+        {
+          printf("set failed!\n");
+        }
+      }
+
+    } else if ( !strncmp("c ",buf,2) || !strncmp("call ",buf,5) )
+    {
+      int num_args,i,ret;
+      char *buf2;
+      int *args;
+      
+      buf2 = buf;
+      num_args = 0;
+      while ( (buf2 = strchr(buf2,' ')) != NULL )
+      {
+        num_args++;
+        buf2++;
+      }
+      args = malloc(num_args*sizeof(int));
+      buf2 = buf;
+      i = 0;
+      while ( (buf2 = strchr(buf2,' ')) != NULL )
+      {
+        buf2++;
+        args[i] = strtoul(buf2,NULL,0);
+        i++;
+      }
+
+      if ( !ptp_chdk_call(args,num_args,&ret,&params,&params.deviceinfo) )
+      {
+        printf("error making call\n");
+      } else {
+        printf("%08x %i\n",ret,ret);
+      }
+      free(args);
+      
+    } else if ( !strncmp("prop ",buf,5) )
+    {
+      int start;
+      int end;
+      char *s;
+      int *vals;
+
+      if ( (s = strchr(buf+5,'-')) != NULL )
+      {
+        *s = '\0';
+        start = strtoul(buf+5,NULL,0);
+        end = strtoul(s+1,NULL,0)+1;
+      } else if ( (s = strchr(buf+5,' ')) != NULL )
+      {
+        *s = '\0';
+        start = strtoul(buf+5,NULL,0);
+        end = start+strtoul(s+1,NULL,0);
+      } else {
+        start = strtoul(buf+5,NULL,0);
+        end = start+1;
+      }
+      
+      if ( (vals = ptp_chdk_get_propcase(start,end-start,&params,&params.deviceinfo)) == NULL )
+      {
+        printf("error getting properties\n");
+      } else {
+        int i;
+        for (i=start; i<end; i++)
+        {
+          printf("%3i: %i\n",i,vals[i-start]);
+        }
+        hexdump((char *) vals,(end-start)*4,start*4);
+        free(vals);
+      }
+      
+    } else if ( !strncmp("param ",buf,6) )
+    {
+      int start;
+      int end;
+      char *s;
+      char *buf2;
+
+      if ( (s = strchr(buf+6,'-')) != NULL )
+      {
+        *s = '\0';
+        start = strtoul(buf+6,NULL,0);
+        end = strtoul(s+1,NULL,0)+1;
+      } else if ( (s = strchr(buf+6,' ')) != NULL )
+      {
+        *s = '\0';
+        start = strtoul(buf+6,NULL,0);
+        end = start+strtoul(s+1,NULL,0);
+      } else {
+        start = strtoul(buf+6,NULL,0);
+        end = start+1;
+      }
+      
+      if ( (buf2 = ptp_chdk_get_paramdata(start,end-start,&params,&params.deviceinfo)) == NULL )
+      {
+        printf("error getting parameter data\n");
+      } else {
+        int i;
+        char *p = buf2;
+        for (i=start; i<end; i++)
+        {
+          int t = *((int *) p);
+          p += 4;
+          printf("%03i: ",i);
+          print_safe(p,t);
+          printf(" (len=%i",t);
+          if ( t == 1 )
+          {
+            printf(",val=%u)",*p);
+          } else if ( t == 2 )
+          {
+            printf(",val=%u)",*((short *) p));
+          } else if ( t == 4 )
+          {
+            printf(",val=%u)",*((int *) p));
+          }
+          printf(")\n");
+          p += t;
+        }
+        hexdump(buf2,p-buf2,0);
+        free(buf2);
+      }
+
+    } else if ( !strncmp("upload ",buf,7) )
+    {
+      char *s;
+
+      if ( (s = strchr(buf,'\r')) != NULL )
+      {
+        *s = '\0';
+      }
+      if ( (s = strchr(buf,'\n')) != NULL )
+      {
+        *s = '\0';
+      }
+
+      if ( (s = strchr(buf+7,' ')) == NULL )
+      {
+        printf("invalid arguments\n");
+      } else {
+        *s = '\0';
+        s++;
+      
+        if ( !ptp_chdk_upload(buf+7,s,&params,&params.deviceinfo) )
+        {
+          printf("upload failed!\n");
+        }
+      }
+
+    } else if ( !strncmp("download ",buf,9) )
+    {
+      char *s;
+
+      if ( (s = strchr(buf,'\r')) != NULL )
+      {
+        *s = '\0';
+      }
+      if ( (s = strchr(buf,'\n')) != NULL )
+      {
+        *s = '\0';
+      }
+
+      if ( (s = strchr(buf+9,' ')) == NULL )
+      {
+        printf("invalid arguments\n");
+      } else {
+        *s = '\0';
+        s++;
+      
+        if ( !ptp_chdk_download(buf+9,s,&params,&params.deviceinfo) )
+        {
+          printf("download failed!\n");
+        }
+      }
+
+    } else if ( !strncmp("mode ",buf,5) )
+    {
+      if ( !ptp_chdk_switch_mode(strtoul(buf+5,NULL,0),&params,&params.deviceinfo) )
+      {
+        printf("mode switch failed!\n");
+      }
+
+    } else if ( !strncmp("lua ",buf,4) )
+    {
+      if ( !ptp_chdk_exec_lua(buf+4,0,&params,&params.deviceinfo) )
+      {
+        printf("execution failed!\n");
+      }
+
+    } else if ( !strncmp("luar ",buf,5) )
+    {
+      if ( !ptp_chdk_exec_lua(buf+5,2,&params,&params.deviceinfo) )
+      {
+        printf("execution failed!\n");
+      }
+    } else if ( !strcmp("script-support",buf) )
+    {
+	  int status;
+      if ( ptp_chdk_get_script_support(&params,&params.deviceinfo,&status) )
+      {
+        printf("script-support:0x%x lua=%s\n",status,(status & PTP_CHDK_SCRIPT_SUPPORT_LUA) ? "yes":"no");
+      }
+    } else if ( !strcmp("script-status",buf) )
+    {
+      int status;
+      if ( ptp_chdk_get_script_status(&params,&params.deviceinfo,&status) )
+      {
+        printf("script-status:0x%x run=%s msg=%s\n",status,
+                (status & PTP_CHDK_SCRIPT_STATUS_RUN) ? "yes":"no",
+                (status & PTP_CHDK_SCRIPT_STATUS_MSG) ? "yes":"no");
+      }
+    } else if ( !strcmp("getm",buf) )
+    {
+      ptp_chdk_print_all_script_messages(&params,&params.deviceinfo);
+    } else if ( !strncmp("putm ",buf,5) )
+    {
+      int status;
+      if ( !ptp_chdk_write_script_msg(&params,&params.deviceinfo,buf+5,strlen(buf+5),&status) )
+      {
+        printf("putm failed!\n");
+      } else {
+        switch(status) {
+          case PTP_CHDK_S_MSGSTATUS_OK:
+          break;
+          case PTP_CHDK_S_MSGSTATUS_NOTRUN:
+            printf("no script running\n");
+          break;
+          case PTP_CHDK_S_MSGSTATUS_QFULL:
+            printf("message queue full\n");
+          break;
+          case PTP_CHDK_S_MSGSTATUS_BADID:
+            printf("running script id mismatch\n");
+          break;
+          default:
+            printf("unexpected status code %d\n",status);
+        }
+      }
+    } else {
+      printf("unknown command\n");
+    }
+    // in command line mode parse command once and then exit:
+    if (chdkmode==CHDK_MODE_CLI)
+      break;
+  }
+
+  if ( connected )
+  {
+    close_connection();
+  }
+
+  return 0;
 }

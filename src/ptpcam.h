@@ -57,7 +57,9 @@ int myusb_bulk_write(usb_dev_handle *dev, int ep, char *bytes, int length,
 }
 
 /* error reporting macro */
+#ifndef ERROR
 #define ERROR(error) fprintf(stderr,"ERROR: "error);				
+#endif
 
 /* property value printing macros */
 #define PRINT_PROPVAL_DEC(value)	\
@@ -96,6 +98,8 @@ int myusb_bulk_write(usb_dev_handle *dev, int ep, char *bytes, int length,
 #define ACT_NIKON_DC		0x101
 #define ACT_NIKON_DC2		0x102
 #define ACT_NIKON_IC		0x103
+
+#define ACT_CHDK		0x1337
 
 /* printing value type */
 #define PTPCAM_PRINT_HEX	00
