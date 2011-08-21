@@ -891,7 +891,7 @@ protocol version history
 #define PTP_OC_CHDK 0x9999
 
 // N.B.: unused parameters should be set to 0
-enum {
+enum ptp_chdk_command {
   PTP_CHDK_Version = 0,     // return param1 is major version number
                             // return param2 is minor version number
   PTP_CHDK_GetMemory,       // param2 is base address (not NULL; circumvent by taking 0xFFFFFFFF and size+1)
@@ -933,10 +933,10 @@ enum {
                             // data length is handled by ptp data phase
                             // input messages do not have type or subtype, they are always a string destined for the script (similar to USER/string)
                             // output param1 is ptp_chdk_script_msg_status
-} ptp_chdk_command;
+};
 
 // data types as used by ReadScriptMessage
-enum {
+enum ptp_chdk_script_data_type {
   PTP_CHDK_TYPE_UNSUPPORTED = 0, // type name will be returned in data
   PTP_CHDK_TYPE_NIL,
   PTP_CHDK_TYPE_BOOLEAN,
@@ -945,7 +945,7 @@ enum {
   PTP_CHDK_TYPE_TABLE,  // tables are converted to a string by usb_msg_table_to_string, 
                         // this function can be overridden in lua to change the format
                         // the string may be empty for an empty table
-} ptp_chdk_script_data_type;
+} ;
 
 // TempData flags
 #define PTP_CHDK_TD_DOWNLOAD  0x1  // download data instead of upload
@@ -965,28 +965,28 @@ enum {
 #define PTP_CHDK_SCRIPT_SUPPORT_LUA  0x1
 
 // message types
-enum {
+enum ptp_chdk_script_msg_type {
     PTP_CHDK_S_MSGTYPE_NONE = 0, // no messages waiting
     PTP_CHDK_S_MSGTYPE_ERR,      // error message
     PTP_CHDK_S_MSGTYPE_RET,      // script return value
     PTP_CHDK_S_MSGTYPE_USER,     // message queued by script
 // TODO chdk console data ?
-} ptp_chdk_script_msg_type;
+};
 
 // error subtypes for PTP_CHDK_S_MSGTYPE_ERR and script startup status
-enum {
+enum ptp_chdk_script_error_type {
     PTP_CHDK_S_ERRTYPE_NONE = 0,
     PTP_CHDK_S_ERRTYPE_COMPILE,
     PTP_CHDK_S_ERRTYPE_RUN,
-} ptp_chdk_script_error_type;
+};
 
 // message status
-enum {
+enum ptp_chdk_script_msg_status {
     PTP_CHDK_S_MSGSTATUS_OK = 0, // queued ok
     PTP_CHDK_S_MSGSTATUS_NOTRUN, // no script is running
     PTP_CHDK_S_MSGSTATUS_QFULL,  // queue is full
     PTP_CHDK_S_MSGSTATUS_BADID,  // specified ID is not running
-} ptp_chdk_script_msg_status;
+};
 
 int ptp_chdk_shutdown_hard(PTPParams* params, PTPDeviceInfo* deviceinfo);
 int ptp_chdk_shutdown_soft(PTPParams* params, PTPDeviceInfo* deviceinfo);
